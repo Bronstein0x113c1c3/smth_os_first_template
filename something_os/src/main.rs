@@ -34,10 +34,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
-
+/*
     println!("Initializing Process Scheduler...");
     // 2. Initialize the global Scheduler
-    process::Scheduler::init(phys_mem_offset);
+    process::Scheduler::init(phys_mem_offset);*/
 
     // 3. Register the current execution context as the base root process
     // so we have an 'old' space to save registers into when switching out.
@@ -59,7 +59,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 3. Now this call safely saves the real boot registers into PID 0
     // and seamlessly transitions execution to Process Alpha (PID 1).
     loop {
-        process::yield_now();
+        // process::yield_now();
+         x86_64::instructions::hlt();
     }
 
 
@@ -77,48 +78,34 @@ fn dummy_main_process() -> ! {
         process::yield_now();
     }
 }
-
-fn process_alpha() -> ! {
-    let mut counter = 0;
+pub fn process_alpha() -> ! {
     loop {
-        counter += 1;
-        println!("[Process Alpha] Iteration: {}", counter);
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            print!("A");
+        });
 
-        // A loop the compiler is physically forbidden from optimizing away
-        for _ in 0..10_000_000 {
-            unsafe { core::ptr::read_volatile(&counter); }
-        }
-
-        process::yield_now();
+        // Give up a brief processing window where preemption can safely happen
+        for _ in 0..50000 { core::hint::spin_loop(); }
     }
 }
 
-fn process_beta() -> ! {
-    let mut counter = 0;
+pub fn process_beta() -> ! {
     loop {
-        counter += 1;
-        println!("  -> [Process Beta] Iteration: {}", counter);
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            print!("B");
+        });
 
-        for _ in 0..10_000_000 {
-            unsafe { core::ptr::read_volatile(&counter); }
-        }
-
-        process::yield_now();
+        for _ in 0..50000 { core::hint::spin_loop(); }
     }
 }
 
-fn process_omega() -> ! {
-    let mut counter = 0;
+pub fn process_omega() -> ! {
     loop {
-        counter += 1;
-        println!("[Process Omega] Iteration: {}", counter);
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            print!("C");
+        });
 
-        // A loop the compiler is physically forbidden from optimizing away
-        for _ in 0..10_000_000 {
-            unsafe { core::ptr::read_volatile(&counter); }
-        }
-
-        process::yield_now();
+        for _ in 0..50000 { core::hint::spin_loop(); }
     }
 }
 

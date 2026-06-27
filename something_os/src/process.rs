@@ -28,13 +28,14 @@ pub struct ProcessContext {
     pub rbp: u64,
     pub rip: u64,
     pub rsp: u64,
+    pub rflags: u64, // Offset 64 <-- ADD THIS FIELD HERE
 }
 
 impl ProcessContext {
     pub const fn zero() -> Self {
         Self {
             r15: 0, r14: 0, r13: 0, r12: 0, rbx: 0, rbp: 0,
-            rip: 0, rsp: 0,
+            rip: 0, rsp: 0, rflags: 0,
         }
     }
 }
@@ -47,8 +48,8 @@ pub struct Process {
 }
 
 pub struct Scheduler {
-    processes: VecDeque<Process>,
-    current_index: usize,
+    pub processes: VecDeque<Process>,
+    pub current_index: usize,
 }
 
 impl Scheduler {
@@ -81,13 +82,27 @@ impl Scheduler {
         const STACK_SIZE: usize = 4096 * 4;
         let mut stack = Box::new([0u8; STACK_SIZE]);
 
-        // FIX 1: Adjust the stack top down by 8 bytes to make a safe slot
-        // for the assembly `ret` instruction to pop from!
-        let stack_top = (stack.as_ptr() as u64 + STACK_SIZE as u64) - 8;
+        let stack_top = unsafe {
+            let mut ptr = stack.as_mut_ptr().add(STACK_SIZE) as *mut u64;
+
+            // --- Forge the Hardware Interrupt Frame (Required by iretq) ---
+            ptr = ptr.sub(1); *ptr = 0x10;               // SS (Data Segment Selector)
+            ptr = ptr.sub(1); *ptr = ptr as u64 + 16;    // RSP (Stack pointer pointing to top)
+            ptr = ptr.sub(1); *ptr = 0x200;              // RFLAGS (0x200 keeps interrupts enabled!)
+            ptr = ptr.sub(1); *ptr = 0x08;               // CS (Code Segment Selector)
+            ptr = ptr.sub(1); *ptr = entry_point as u64; // RIP (Where execution begins)
+
+            // --- Forge the 15 General Purpose Registers (Required by assembly pops) ---
+            for _ in 0..15 {
+                ptr = ptr.sub(1);
+                *ptr = 0; // Initialize general purpose registers to 0
+            }
+
+            ptr as u64
+        };
 
         let mut context = ProcessContext::zero();
-        context.rip = entry_point as u64;
-        context.rsp = stack_top;
+        context.rsp = stack_top; // Set context structure directly to our aligned top pointer
 
         let process = Process {
             id: pid,
@@ -127,25 +142,28 @@ impl Scheduler {
     // }
 
     pub fn switch(&mut self) {
-        if self.processes.len() < 2 {
-            return;
-        }
+        let mut old_ptr: *mut ProcessContext = core::ptr::null_mut();
+        let mut new_ptr: *const ProcessContext = core::ptr::null();
 
-        let old_index = self.current_index;
-        let next_index = (old_index + 1) % self.processes.len();
-        self.current_index = next_index;
+        if let Some(ref mut sched) = *SCHEDULER.lock() {
+            if sched.processes.len() < 2 { return; }
 
-        self.processes[old_index].state = ProcessState::Ready;
-        self.processes[next_index].state = ProcessState::Running;
+            let old_index = sched.current_index;
+            let next_index = (old_index + 1) % sched.processes.len();
+            sched.current_index = next_index;
 
-        // 1. Extract raw pointers while the scheduler structure is accessible
-        let old_ctx_ptr = &mut self.processes[old_index].context as *mut ProcessContext;
-        let new_ctx_ptr = &self.processes[next_index].context as *const ProcessContext;
+            sched.processes[old_index].state = ProcessState::Ready;
+            sched.processes[next_index].state = ProcessState::Running;
 
-        // 2. CRITICAL FIX: We must temporarily move the context switch outside
-        // the global Mutex lock state, or drop the lock explicitly if called from yield_now.
-        unsafe {
-            context_switch(old_ctx_ptr, new_ctx_ptr);
+            old_ptr = &mut sched.processes[old_index].context as *mut ProcessContext;
+            new_ptr = &sched.processes[next_index].context as *const ProcessContext;
+        } // <--- The SCHEDULER Mutex lock guard cleanly drops right here
+
+        // Perform the low-level context switch outside the spinlock scope
+        if !old_ptr.is_null() && !new_ptr.is_null() {
+            unsafe {
+                context_switch(old_ptr, new_ptr);
+            }
         }
     }
 }
@@ -155,30 +173,34 @@ core::arch::global_asm!(
     .global context_switch
     .type context_switch, @function
     context_switch:
-    # 1. Save old task context
+    # rdi -> pointer to old ProcessContext
+    # rsi -> pointer to new ProcessContext
+
+    # 1. SAVE OLD TASK CONTEXT
     mov [rdi + 0], r15
     mov [rdi + 8], r14
     mov [rdi + 16], r13
     mov [rdi + 24], r12
     mov [rdi + 32], rbx
     mov [rdi + 40], rbp
-    mov [rdi + 56], rsp
+    mov [rdi + 56], rsp # Save stack pointer
 
-    mov rax, [rsp]
-    mov [rdi + 48], rax
+    mov rax, [rsp]      # Get return address from stack
+    mov [rdi + 48], rax # Save as RIP
 
-    # 2. Load new task context
+    # 2. LOAD NEW TASK CONTEXT
     mov r15, [rsi + 0]
     mov r14, [rsi + 8]
     mov r13, [rsi + 16]
     mov r12, [rsi + 24]
     mov rbx, [rsi + 32]
     mov rbp, [rsi + 40]
-    mov rsp, [rsi + 56]
+    mov rsp, [rsi + 56] # Switch to new process stack pointer
 
-    mov rax, [rsi + 48]
-    mov [rsp], rax
+    mov rax, [rsi + 48] # Get target RIP
+    mov [rsp], rax      # Place it on top of the new stack
 
+    # DO NOT use popfq here! We let the execution loop handle flags.
     ret
     "#
 );
@@ -195,30 +217,57 @@ unsafe extern "C" {
 //     });
 // }
 
+// Inside src/process.rs
+
+/// Manual, cooperative yield used voluntarily by processes
 pub fn yield_now() {
+    unsafe {
+        // Disable interrupts during the critical scheduler recalculation phase
+        x86_64::instructions::interrupts::disable();
+
+        execute_switch();
+
+        // Turn interrupts back on when this process eventually wakes back up
+        x86_64::instructions::interrupts::enable();
+    }
+}
+
+/// Forced, preemptive yield called exclusively by the hardware timer interrupt handler
+pub fn preempt_now() {
+    unsafe {
+        // Hardware timer context requires interrupts to be disabled during the stack swap
+        x86_64::instructions::interrupts::disable();
+
+        execute_switch();
+
+        // Essential: Re-enable interrupts when the newly scheduled process wakes up here!
+        x86_64::instructions::interrupts::enable();
+    }
+}
+
+/// Core scheduling wrapper that safely extracts pointers and fires the assembly swapper
+fn execute_switch() {
     let mut old_ptr: *mut ProcessContext = core::ptr::null_mut();
     let mut new_ptr: *const ProcessContext = core::ptr::null();
 
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        if let Some(ref mut sched) = *SCHEDULER.lock() {
-            if sched.processes.len() < 2 { return; }
+    if let Some(ref mut sched) = *SCHEDULER.lock() {
+        if sched.processes.len() < 2 { return; }
 
-            let old_index = sched.current_index;
-            let next_index = (old_index + 1) % sched.processes.len();
-            sched.current_index = next_index;
+        let old_index = sched.current_index;
+        let next_index = (old_index + 1) % sched.processes.len();
+        sched.current_index = next_index;
 
-            sched.processes[old_index].state = ProcessState::Ready;
-            sched.processes[next_index].state = ProcessState::Running;
+        sched.processes[old_index].state = ProcessState::Ready;
+        sched.processes[next_index].state = ProcessState::Running;
 
-            old_ptr = &mut sched.processes[old_index].context as *mut ProcessContext;
-            new_ptr = &sched.processes[next_index].context as *const ProcessContext;
-        } // <--- The SCHEDULER Mutex is officially dropped and unlocked HERE!
+        old_ptr = &mut sched.processes[old_index].context as *mut ProcessContext;
+        new_ptr = &sched.processes[next_index].context as *const ProcessContext;
+    } // <--- The SCHEDULER Mutex lock guard cleanly drops right here
 
-        // Now it is perfectly safe to switch tasks because the lock is wide open
-        if !old_ptr.is_null() && !new_ptr.is_null() {
-            unsafe {
-                context_switch(old_ptr, new_ptr);
-            }
+    // Perform the low-level context switch outside the spinlock scope
+    if !old_ptr.is_null() && !new_ptr.is_null() {
+        unsafe {
+            context_switch(old_ptr, new_ptr);
         }
-    });
+    }
 }

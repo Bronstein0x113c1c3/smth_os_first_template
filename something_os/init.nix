@@ -18,6 +18,7 @@ mkShell {
     # 2. Add the required component for OS dev (sysroot compilation)
     rustup component add rust-src
 
+    rustup component add llvm-tools-preview
 
 
     echo "--- Environment ready! ---"
