@@ -6,9 +6,16 @@
 pub mod vga_buffer;
 pub mod gdt;
 pub(crate) mod interrupt;
+pub(crate) mod memory;
+pub(crate) mod allocator;
+pub(crate) mod process;
+
+extern crate alloc;
+
+use memory::BootInfoFrameAllocator;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-
+use x86_64::VirtAddr;
 use crate::interrupt::init_idt;
 // use vga_buffer::print;
 
@@ -21,10 +28,102 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // let i = 1;
     // print!("something {}", 5/i);
 
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+
+
+    println!("Initializing Process Scheduler...");
+    // 2. Initialize the global Scheduler
+    process::Scheduler::init(phys_mem_offset);
+
+    // 3. Register the current execution context as the base root process
+    // so we have an 'old' space to save registers into when switching out.
+    println!("Initializing Process Scheduler...");
+    process::Scheduler::init(phys_mem_offset);
+
+    if let Some(ref mut sched) = *process::SCHEDULER.lock() {
+        // 1. FIX: Register the current execution state as the root process.
+        sched.spawn_root();
+
+        // 2. Spawn your actual workloads
+        sched.spawn(process_alpha, &mut frame_allocator);
+        sched.spawn(process_beta, &mut frame_allocator);
+        sched.spawn(process_omega, &mut frame_allocator);
+    }
+
+    println!("Starting multi-process testing execution loop!\n");
+
+    // 3. Now this call safely saves the real boot registers into PID 0
+    // and seamlessly transitions execution to Process Alpha (PID 1).
     loop {
-         x86_64::instructions::hlt();
+        process::yield_now();
+    }
+
+
+
+    // loop {
+    //      x86_64::instructions::hlt();
+    // }
+}
+
+
+
+/// Simple dummy workload representation
+fn dummy_main_process() -> ! {
+    loop {
+        process::yield_now();
     }
 }
+
+fn process_alpha() -> ! {
+    let mut counter = 0;
+    loop {
+        counter += 1;
+        println!("[Process Alpha] Iteration: {}", counter);
+
+        // A loop the compiler is physically forbidden from optimizing away
+        for _ in 0..10_000_000 {
+            unsafe { core::ptr::read_volatile(&counter); }
+        }
+
+        process::yield_now();
+    }
+}
+
+fn process_beta() -> ! {
+    let mut counter = 0;
+    loop {
+        counter += 1;
+        println!("  -> [Process Beta] Iteration: {}", counter);
+
+        for _ in 0..10_000_000 {
+            unsafe { core::ptr::read_volatile(&counter); }
+        }
+
+        process::yield_now();
+    }
+}
+
+fn process_omega() -> ! {
+    let mut counter = 0;
+    loop {
+        counter += 1;
+        println!("[Process Omega] Iteration: {}", counter);
+
+        // A loop the compiler is physically forbidden from optimizing away
+        for _ in 0..10_000_000 {
+            unsafe { core::ptr::read_volatile(&counter); }
+        }
+
+        process::yield_now();
+    }
+}
+
+
+
 
 /// This function is called on panic.
 #[panic_handler]
