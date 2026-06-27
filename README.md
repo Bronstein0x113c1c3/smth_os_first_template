@@ -18,4 +18,5 @@ Clone the repository and navigate into the project directory. Then, spin up the 
 ```bash
 $ cd something_os
 $ nix-shell init.nix
+$ cargo install bootimage
 $ cargo run
