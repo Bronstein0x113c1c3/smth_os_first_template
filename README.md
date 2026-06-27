@@ -16,4 +16,7 @@ If you don't have Nix installed, follow the installation instructions at [nixos.
 Clone the repository and navigate into the project directory. Then, spin up the Nix shell. This will automatically pull in QEMU, GCC, and configure your Rust nightly toolchain, `rust-src`, and `bootimage`.
 
 ```bash
-nix-shell
+$ cd something_os
+$ nix-shell init.nix
+$ cargo install bootimage
+$ cargo run
