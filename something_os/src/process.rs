@@ -72,9 +72,8 @@ impl Scheduler {
         self.current_index = 0;
     }
 
-    pub fn spawn<A>(&mut self, entry_point: fn() -> !, _frame_allocator: &mut A) -> u64
-    where
-    A: FrameAllocator<Size4KiB>,
+    pub fn spawn(&mut self, entry_point: fn() -> !) -> u64
+
     {
         static NEXT_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
         let pid = NEXT_PID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);

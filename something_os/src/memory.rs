@@ -4,6 +4,8 @@ use x86_64::{
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
 };
 
+
+
 /// Initialize a new OffsetPageTable.
 ///
 /// This function is unsafe because the caller must guarantee that the
@@ -43,6 +45,8 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
         None
     }
 }
+
+
 
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 pub struct BootInfoFrameAllocator {

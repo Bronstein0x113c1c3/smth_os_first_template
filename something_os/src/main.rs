@@ -17,9 +17,28 @@ use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use x86_64::VirtAddr;
 use crate::interrupt::init_idt;
+use spin::Mutex;
+use x86_64::structures::paging::OffsetPageTable;
+use bootloader::bootinfo::MemoryMap;
 // use vga_buffer::print;
 
 entry_point!(kernel_main);
+
+
+// Tạo static Mutex để chia sẻ toàn cục
+pub static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
+pub static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
+
+// Sửa lại hàm init trong memory.rs của bạn để khởi tạo các biến static này
+pub unsafe fn init_global_memory(phys_mem_offset: VirtAddr, memory_map: &'static MemoryMap) {
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(memory_map) };
+
+    // Đưa vào global static
+    *MAPPER.lock() = Some(mapper);
+    *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
+}
+
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     gdt::init();
     init_idt();
@@ -29,10 +48,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // print!("something {}", 5/i);
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    // let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    // let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    unsafe {
+                init_global_memory(phys_mem_offset,&boot_info.memory_map );
+    }
 
-    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+    // allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+    allocator::init_heap();
+
+
 
 /*
     println!("Initializing Process Scheduler...");
@@ -49,9 +74,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         sched.spawn_root();
 
         // 2. Spawn your actual workloads
-        sched.spawn(process_alpha, &mut frame_allocator);
-        sched.spawn(process_beta, &mut frame_allocator);
-        sched.spawn(process_omega, &mut frame_allocator);
+        sched.spawn(process_alpha);
+        sched.spawn(process_beta);
+        sched.spawn(process_omega);
     }
 
     println!("Starting multi-process testing execution loop!\n");

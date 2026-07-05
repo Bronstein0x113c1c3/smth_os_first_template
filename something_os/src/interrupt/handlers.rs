@@ -2,7 +2,7 @@
 
 #[macro_use]
 use crate::vga_buffer;
-use crate::{print,println};
+use crate::{memory, print, println};
 use pic8259::ChainedPics;
 use spin;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
@@ -41,13 +41,46 @@ pub extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
     use x86_64::registers::control::Cr2;
+    use x86_64::structures::paging::{Page, PageTableFlags,Size4KiB,FrameAllocator,Mapper};
+    use x86_64::VirtAddr;
+    let accessed_address = Cr2::read();
 
+    let heap_start = VirtAddr::new(crate::allocator::HEAP_START as u64);
+    let heap_end = heap_start + crate::allocator::HEAP_SIZE as u64;
+
+    // Kiểm tra nếu lỗi xảy ra trong vùng Heap ảo
+    if accessed_address >= heap_start && accessed_address < heap_end {
+        // Khóa (Lock) các biến toàn cục một cách an toàn
+        let mut mapper_lock = crate::MAPPER.lock();
+        let mut frame_allocator_lock = crate::FRAME_ALLOCATOR.lock();
+
+        // Kiểm tra xem các biến static đã được khởi tạo thành công từ main chưa
+        if let (Some(ref mut mapper), Some(ref mut frame_allocator)) =
+            (mapper_lock.as_mut(), frame_allocator_lock.as_mut())
+            {
+                let page = Page::<Size4KiB>::containing_address(accessed_address);
+
+                if let Some(frame) = frame_allocator.allocate_frame() {
+                    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+                    unsafe {
+                        if let Ok(tlb) = mapper.map_to(page, frame, flags,  *frame_allocator) {
+                            tlb.flush(); // Cập nhật TLB ngay lập tức
+                            return; // Sửa lỗi thành công, tiếp tục chạy chương trình
+                        }
+                    }
+                }
+            }
+    }
+
+    // Nếu không phải lỗi của heap hoặc không map được bộ nhớ vật lý -> Panic
     println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
+    println!("Accessed Address: {:?}", accessed_address);
     println!("Error Code: {:?}", error_code);
     println!("{:#?}", stack_frame);
-    hlt_loop();
+    panic!("Unhandled Page Fault");
 }
 
 pub extern "x86-interrupt" fn double_fault_handler(
