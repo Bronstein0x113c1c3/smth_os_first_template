@@ -14,6 +14,8 @@ mkShell {
 
     # 1. Ensure rustup is using nightly
     rustup default nightly
+    rustup override set nightly-2026-06-01
+
 
     # 2. Add the required component for OS dev (sysroot compilation)
     rustup component add rust-src
